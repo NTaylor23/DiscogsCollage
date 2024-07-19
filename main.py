@@ -1,7 +1,9 @@
 from argparse import ArgumentParser, BooleanOptionalAction
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from json import loads
-from math import ceil, pow, sqrt
+from math import ceil, sqrt
+from multiprocessing import cpu_count
 from os import getenv
 from requests import ConnectionError, get
 from typing import List
@@ -9,6 +11,7 @@ from typing import List
 from PIL import Image
 
 
+THREADS = cpu_count()
 TOKEN = getenv("DISCOGS_TOKEN", None)
 if not TOKEN:
     raise EnvironmentError("No Discogs auth token available! Exiting.")
@@ -16,40 +19,50 @@ if not TOKEN:
 HEADERS = {"Authorization": TOKEN, "User-Agent": "InsomniaDiscogs/1.0"}
 
 
+def fetch(url: str) -> bytes:
+    try:
+        response = get(url=url, headers=HEADERS)
+        return response.content
+    except ConnectionError:
+        raise ("Error fetching from image URL.")
+
+
 class DiscogsCollage:
     """Generate a collage of album art from a user's Discogs collection."""
 
     def __init__(self, username: str, square_size: int, sort: bool) -> None:
         self.username = username
-        self.square_dim = square_size
+        self.square_size = square_size
         self.sort = sort
 
     def create_collage(self, image_bytes: List[bytes]) -> Image:
         """Create a collage on a blank canvas from all album art images. Overflow vertically."""
-        sz = len(image_bytes)
-        square = pow(ceil(sqrt(sz)), 2)
-        dim = int(sqrt(square)) * self.square_dim
-        idx = 0
+        sz, idx, trim = len(image_bytes), 0, 0
+        dim = ceil(sqrt(sz)) * self.square_size
+        images_in_row_col = dim // self.square_size
+        if images_in_row_col**2 > (sz + images_in_row_col):
+            trim = self.square_size
 
-        result = Image.new(mode="RGB", size=(dim, dim))
-        for i in range(0, dim, self.square_dim):
-            for j in range(0, dim, self.square_dim):
+        result = Image.new(mode="RGB", size=(dim, dim - trim))
+        for i in range(0, dim, self.square_size):
+            for j in range(0, dim, self.square_size):
                 if idx >= sz:
                     return result
                 img = Image.open(BytesIO(image_bytes[idx]))
                 result.paste(
-                    im=img.resize(size=(self.square_dim, self.square_dim)),
-                    box=(i, j, i + self.square_dim, j + self.square_dim),
+                    im=img.resize(size=(self.square_size, self.square_size)),
+                    box=(j, i, j + self.square_size, i + self.square_size),
                 )
                 idx += 1
+
         return result
 
     def get_images(self, release_thumbnails: List[int]) -> List[bytes]:
         """Retrieve images from URLs, save as bytes."""
-        return [
-            get(url=image_data, headers=HEADERS).content
-            for image_data in release_thumbnails
-        ]
+        result = []
+        with ThreadPoolExecutor(max_workers=THREADS) as executor:
+            result = list(executor.map(fetch, release_thumbnails))
+        return result
 
     def get_image_urls(self) -> List[str]:
         """Extract image URLs from the user's main collection (0)."""
@@ -129,4 +142,4 @@ if __name__ == "__main__":
     image_bytes = collage.get_images(release_ids)
     result = collage.create_collage(image_bytes)
 
-    result.save("out.png")  # output to the project folder
+    result.save(".out.png")  # output to the project folder
